@@ -26,3 +26,8 @@ cd Repository
 
 # Install dependencies
 npm install  # or pip install -r requirements.txt
+📧 Contact
+
+If you want to request permission to use this code, please contact:
+mrazep-droid
+📩 Email: mrazepdroid@gmail.com
