@@ -16,17 +16,7 @@ All rights reserved. Unauthorized use is strictly prohibited.
 - List the required software or dependencies
 - Example: Node.js, Python, etc.
 
-## 🚀 Installation
-```bash
-# Clone this repository
-git clone https://github.com/mrazep-droid/Repository.git
-
-# Enter the project folder
-cd Repository
-
-# Install dependencies
-npm install  # or pip install -r requirements.txt
-📧 Contact
+## 📧 Contact
 
 If you want to request permission to use this code, please contact:
 mrazep-droid
