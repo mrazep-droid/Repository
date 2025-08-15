@@ -1,0 +1,5 @@
+local args = {
+	"tier1LevelsEnchant",
+	"buy"
+}
+game:GetService("ReplicatedStorage"):WaitForChild("ReplicatedRemotes"):WaitForChild("itemActionRemote"):FireServer(unpack(args))
