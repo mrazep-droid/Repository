@@ -6,6 +6,10 @@ local RunService = game:GetService("RunService")
 local FIREBASE_URL = "https://troll-master67-default-rtdb.firebaseio.com/"
 local MY_ROLE = "Target" 
 
+-- === SISTEM PENGAMAN WAKTU ===
+local SCRIPT_START_TIME = os.time() -- Mencatat detik tepat saat player baru join/eksekusi
+local COMMAND_EXPIRY_TIME = 10     -- Perintah yang lebih lama dari 10 detik akan otomatis hangus
+
 local lastCommandId = ""
 local orbitConnection
 local spasmConnection
@@ -49,6 +53,18 @@ end)
 
 local function executeCommand(cmdData)
     if not cmdData or cmdData.id == lastCommandId then return end
+    
+    -- VALIDASI TIMESTAMP / CEK WAKTU KETAT
+    local cmdTimestamp = tonumber(cmdData.timestamp) or 0
+    local currentTime = os.time()
+    
+    -- 1. Jika perintah dibuat sebelum player ini running skrip, TOLAK.
+    if cmdTimestamp < SCRIPT_START_TIME then return end
+    
+    -- 2. Jika perintah sudah terlalu lama di database (kedaluwarsa), TOLAK.
+    if (currentTime - cmdTimestamp) > COMMAND_EXPIRY_TIME then return end
+    
+    -- Jika lolos sensor waktu, tandai ID dan eksekusi
     lastCommandId = cmdData.id
     
     local command = cmdData.command
@@ -158,17 +174,6 @@ local function executeCommand(cmdData)
         end
     end
 end
-
--- FIX LANGSUNG MATI SAAT JOIN: Amankan ID perintah yang sedang aktif di database saat ini
-pcall(function()
-    local response = game:HttpGet(FIREBASE_URL .. "command.json")
-    if response and response ~= "null" then
-        local data = HttpService:JSONEncode(response)
-        if data and data.id then
-            lastCommandId = data.id
-        end
-    end
-end)
 
 registerPlayer()
 task.spawn(function()
