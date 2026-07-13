@@ -1,6 +1,11 @@
 local player = game.Players.LocalPlayer
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local currentPlaceId = game.PlaceId
+local targetPlaceId = 131378148336503
+
+if currentPlaceId == targetPlaceId then
+    -- Code to run only if you ARE in Drag Drive Simulator
 
 -- GUI
 local gui = Instance.new("ScreenGui", player:WaitForChild("PlayerGui"))
@@ -186,3 +191,6 @@ task.spawn(function()
 		end
 	end
 end)
+else
+    -- Else nothing (The script will do absolutely nothing and end here)
+end
