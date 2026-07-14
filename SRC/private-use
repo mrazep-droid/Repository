@@ -67,7 +67,6 @@ local function registerToDatabase()
         role = encRole,
         gameId = tostring(game.JobId),
         placeName = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name,
-        lastSeen = os.time(),
         currentHealth = status.health,
         currentSpeed = status.walkspeed,
         currentJump = status.jumppower,
