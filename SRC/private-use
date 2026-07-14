@@ -5,31 +5,6 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
-local ALLOWED_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ "
-
-local function getShiftValue(display)
-    return (#display % #ALLOWED_CHARS) + 1
-end
-
-local function encryptName(name, display)
-    if name == "all" then return "all" end
-    local shift = getShiftValue(display)
-    local first = name:sub(1, 1)
-    local rest = name:sub(2)
-    local encrypted = ""
-    for i = 1, #rest do
-        local ch = rest:sub(i, i)
-        local idx = ALLOWED_CHARS:find(ch, 1, true)
-        if idx then
-            local newIdx = (idx + shift - 1) % #ALLOWED_CHARS + 1
-            encrypted = encrypted .. ALLOWED_CHARS:sub(newIdx, newIdx)
-        else
-            encrypted = encrypted .. ch
-        end
-    end
-    return first .. encrypted
-end
-
 local lastCommandId = ""
 
 local function getCharacterElements()
@@ -56,11 +31,10 @@ local function getLiveStatus()
 end
 
 local function registerToDatabase()
-    local encName = encryptName(LocalPlayer.Name, LocalPlayer.Name)
     local status = getLiveStatus()
 
     local playerData = {
-        name = encName,
+        name = LocalPlayer.Name,
         role = "m5N0q",
         gameId = tostring(game.JobId),
         placeName = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name,
