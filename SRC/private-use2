@@ -1,310 +1,248 @@
--- ============================================================================
--- [01] SERVICES & KERNEL INITIALIZATION
--- ============================================================================
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 
--- ============================================================================
--- [02] CONFIGURATION MANAGER
--- ============================================================================
 local Config = {
-    FIREBASE_URL = "https://your-database-id.firebaseio.com/commands.json",
-    AUTH_KEY = "obsidian_secure_token_2026",
+    FIREBASE_URL = "https://your-database-id.firebaseio.com/data.json",
     POLL_INTERVAL = 1.5,
-    MAX_RETRIES = 3,
-    COMMAND_EXPIRY_TIMEOUT = 15, -- detik
-    MAX_PROCESSED_CACHE_SIZE = 100
+    COMMAND_TIMEOUT = 15,
+    MAX_CACHE_SIZE = 100
 }
 
--- ============================================================================
--- [03] STRUCTURED LOGGER
--- ============================================================================
-local Logger = {}
-Logger.__index = Logger
-
-function Logger:Write(category, level, message)
-    local timestamp = os.date("%H:%M:%S")
-    print(string.format("[%s] [%s] [%s]: %s", timestamp, category:upper(), level:upper(), message))
-end
-
--- ============================================================================
--- [04] NETWORK LAYER (HTTP Wrapper with Exponential Backoff & Jitter)
--- ============================================================================
-local Network = {}
-
-function Network:FetchPayload(url)
-    local retries = 0
-    local success, response
-    
-    repeat
-        success, response = pcall(function()
-            -- Menggunakan alternative HTTP request provider yang tersedia pada executor
-            local req = (syn and syn.request) or (http and http.request) or http_request or request
-            if req then
-                local res = req({ Url = url, Method = "GET", Headers = { ["Content-Type"] = "application/json" } })
-                if res and res.StatusCode == 200 then return res.Body end
-            else
-                return game:HttpGet(url)
-            end
-        end)
-        
-        if success and response and response ~= "null" then
-            return response
-        end
-        
-        retries = retries + 1
-        if retries < Config.MAX_RETRIES then
-            -- Exponential backoff + basic jitter untuk mencegah Thundering Herd
-            local backoffDelay = math.pow(2, retries) + (math.random() * 0.5)
-            Logger:Write("Network", "Warn", "Fetch failed. Retrying in " .. string.format("%.2f", backoffDelay) .. "s...")
-            task.wait(backoffDelay)
-        end
-    until retries >= Config.MAX_RETRIES
-    
-    return nil
-end
-
--- ============================================================================
--- [05] JSON PARSER
--- ============================================================================
-local JsonParser = {}
-
-function JsonParser:SafeDecode(rawString)
-    if not rawString or rawString == "" then return nil end
-    local success, result = pcall(HttpService.JSONDecode, HttpService, rawString)
-    if not success then
-        Logger:Write("Parser", "Error", "Failed to parse JSON schema payload string")
-        return nil
+local Logger = {
+    Write = function(self, category, level, message)
+        local timestamp = os.date("%H:%M:%S")
+        print(string.format("[%s] [%s] [%s]: %s", timestamp, category:upper(), level:upper(), message))
     end
-    return result
-end
-
--- ============================================================================
--- [06] SCHEMA VALIDATOR
--- ============================================================================
-local SchemaValidator = {}
-
-function SchemaValidator:ValidateCommand(cmdData)
-    if type(cmdData) ~= "table" then return false end
-    
-    -- Struktur minimum validasi skema runtime
-    local requiredFields = { id = "string", command = "string", timestamp = "number", auth = "string" }
-    for field, expectedType in pairs(requiredFields) do
-        if cmdData[field] == nil or type(cmdData[field]) ~= expectedType then
-            Logger:Write("Validation", "Warn", "Invalid structure on field: " .. field)
-            return false
-        end
-    end
-    
-    -- Validasi integritas otentikasi kunci
-    if cmdData.auth ~= Config.AUTH_KEY then
-        Logger:Write("Validation", "Error", "Signature token verification failure")
-        return false
-    end
-    
-    return true
-end
-
--- ============================================================================
--- [07] CACHE MANAGER (State Tracking & Duplicate Prevention)
--- ============================================================================
-local CacheManager = {
-    ProcessedCommandIds = {},
-    CommandCount = 0,
-    ActiveLoops = { Spasm = nil, Orbit = nil }
 }
 
-function CacheManager:IsDuplicate(cmdId)
-    return self.ProcessedCommandIds[cmdId] == true
-end
-
-function CacheManager:MarkAsProcessed(cmdId)
-    self.ProcessedCommandIds[cmdId] = true
-    self.CommandCount = self.CommandCount + 1
-    
-    -- Manajemen memori otomatis (Garbage Collection O(1) Look-up)
-    if self.CommandCount > Config.MAX_PROCESSED_CACHE_SIZE then
-        table.clear(self.ProcessedCommandIds)
-        self.CommandCount = 1
-        self.ProcessedCommandIds[cmdId] = true
-    end
-end
-
-function CacheManager:ClearActiveLoops()
-    for key, connection in pairs(self.ActiveLoops) do
-        if connection then
-            connection:Disconnect()
-            self.ActiveLoops[key] = nil
-        end
-    end
-end
-
--- ============================================================================
--- [08] STATE MANAGER (Finite State Machine)
--- ============================================================================
-local StateManager = {
-    CurrentState = "Initializing"
+local Context = {
+    Config = Config,
+    LocalPlayer = LocalPlayer
 }
 
-function StateManager:TransitionTo(newState)
-    if self.CurrentState == newState then return end
-    Logger:Write("State", "Info", self.CurrentState .. " -> " .. newState)
-    self.CurrentState = newState
-end
-
--- ============================================================================
--- [09] DYNAMIC CONTEXT CONSTRUCTOR
--- ============================================================================
-local Context = {}
-
-function Context:GetLatest()
+function Context:GetLiveState()
     local char = LocalPlayer.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     local root = char and char:FindFirstChild("HumanoidRootPart")
     
     return {
-        Player = LocalPlayer,
         Character = char,
         Humanoid = hum,
-        HumanoidRootPart = root,
-        Config = Config,
-        Cache = CacheManager,
-        Services = {
-            Http = HttpService,
-            Players = Players,
-            Run = RunService
-        }
+        RootPart = root,
+        IsAlive = (hum and hum.Health > 0) == true
     }
 end
 
--- ============================================================================
--- [10] COMMAND REGISTRY (Open/Closed Extension Point)
--- ============================================================================
-local Commands = {}
+local CacheManager = { Map = {}, Queue = {}, Head = 1 }
 
-Commands["reset"] = function(ctx, data)
-    if ctx.Humanoid then 
-        ctx.Humanoid.Health = 0 
-        Logger:Write("Application", "Success", "Executed command: reset")
+function CacheManager:IsDuplicate(id)
+    return self.Map[id] == true
+end
+
+function CacheManager:Mark(id)
+    if not id or self.Map[id] then return end
+    
+    local head = self.Head
+    local oldId = self.Queue[head]
+    
+    if oldId then
+        self.Map[oldId] = nil
+    end
+    
+    self.Queue[head] = id
+    self.Map[id] = true
+    
+    self.Head = (head % Config.MAX_CACHE_SIZE) + 1
+end
+
+local Registry = { _storage = {} }
+
+function Registry:Register(commandName, definition)
+    definition.Aliases = definition.Aliases or {}
+    definition.Requirements = definition.Requirements or {}
+    
+    self._storage[commandName:lower()] = definition
+    for _, alias in ipairs(definition.Aliases) do
+        self._storage[alias:lower()] = definition
     end
 end
 
-Commands["freeze"] = function(ctx, data)
-    if ctx.HumanoidRootPart then 
-        ctx.HumanoidRootPart.Anchored = true 
-        Logger:Write("Application", "Success", "Executed command: freeze")
-    end
+function Registry:Get(commandName)
+    if type(commandName) ~= "string" then return nil end
+    return self._storage[commandName:lower()]
 end
 
-Commands["unfreeze"] = function(ctx, data)
-    if ctx.HumanoidRootPart then 
-        ctx.HumanoidRootPart.Anchored = false 
-        Logger:Write("Application", "Success", "Executed command: unfreeze")
-    end
+local Handlers = {}
+
+function Handlers.Reset(ctx, liveState, payload)
+    liveState.Humanoid.Health = 0
+    return true, "Character core forced to respawn"
 end
 
-Commands["walkspeed"] = function(ctx, data)
-    if ctx.Humanoid and data.message then
-        local targetSpeed = tonumber(data.message) or 16
-        ctx.Humanoid.WalkSpeed = targetSpeed
-        Logger:Write("Application", "Success", "Executed command: walkspeed (" .. targetSpeed .. ")")
-    end
+function Handlers.Freeze(ctx, liveState, payload)
+    liveState.RootPart.Anchored = true
+    return true, "Physical position anchored"
 end
 
-Commands["jumppower"] = function(ctx, data)
-    if ctx.Humanoid and data.message then
-        local targetPower = tonumber(data.message) or 50
-        ctx.Humanoid.UseJumpPower = true
-        ctx.Humanoid.JumpPower = targetPower
-        Logger:Write("Application", "Success", "Executed command: jumppower (" .. targetPower .. ")")
-    end
+function Handlers.Unfreeze(ctx, liveState, payload)
+    liveState.RootPart.Anchored = false
+    return true, "Physical position released"
 end
 
--- ============================================================================
--- [11] DISPATCHER ENGINE
--- ============================================================================
+function Handlers.WalkSpeed(ctx, liveState, payload)
+    local targetSpeed = tonumber(payload.message) or 16
+    liveState.Humanoid.WalkSpeed = targetSpeed
+    return true, "Walkspeed adjusted to " .. targetSpeed
+end
+
+Registry:Register("reset", {
+    Name = "Reset", 
+    Description = "Mereset karakter.", 
+    Requirements = { Humanoid = true, Alive = true }, 
+    Handler = Handlers.Reset
+})
+
+Registry:Register("freeze", {
+    Name = "Freeze", 
+    Description = "Mengunci posisi.", 
+    Aliases = { "anchor" }, 
+    Requirements = { Root = true }, 
+    Handler = Handlers.Freeze
+})
+
+Registry:Register("unfreeze", {
+    Name = "Unfreeze", 
+    Description = "Membuka posisi.", 
+    Aliases = { "unanchor" }, 
+    Requirements = { Root = true }, 
+    Handler = Handlers.Unfreeze
+})
+
+Registry:Register("walkspeed", {
+    Name = "WalkSpeed", 
+    Description = "Mengatur kecepatan.", 
+    Aliases = { "ws", "speed" }, 
+    Requirements = { Humanoid = true }, 
+    Handler = Handlers.WalkSpeed
+})
+
 local Dispatcher = {}
 
-function Dispatcher:Route(payload)
-    if not SchemaValidator:ValidateCommand(payload) then return end
-    if CacheManager:IsDuplicate(payload.id) then return end
-    
-    -- Filter batasan usia eksekusi perintah (Anti Stale Payload)
-    if (os.time() - payload.timestamp) > Config.COMMAND_EXPIRY_TIMEOUT then
-        Logger:Write("Dispatcher", "Warn", "Command dropped due to timeout expiration")
-        return
+local RequirementValidators = {
+    Character = function(d) 
+        return d.Character ~= nil and d.Character:IsDescendantOf(workspace), "Character missing from workspace" 
+    end,
+    Humanoid  = function(d) 
+        return d.Humanoid ~= nil and d.Humanoid:IsDescendantOf(workspace), "Humanoid missing from workspace" 
+    end,
+    Root      = function(d) 
+        return d.RootPart ~= nil and d.RootPart:IsDescendantOf(workspace), "HumanoidRootPart missing from workspace" 
+    end,
+    Alive     = function(d) 
+        return d.IsAlive == true, "Execution denied: Character is dead" 
     end
-    
-    -- Menandai ID agar tidak dieksekusi ulang
-    CacheManager:MarkAsProcessed(payload.id)
-    
-    -- Pencarian handler berbasis kamus asosiatif O(1)
-    local handler = Commands[payload.command]
-    if handler then
-        -- Membersihkan loop/koneksi aktif sebelum mengeksekusi pipeline baru
-        CacheManager:ClearActiveLoops()
-        
-        -- Safe execution context wrapper
-        local ctx = Context:GetLatest()
-        local success, err = pcall(handler, ctx, payload)
-        
-        if not success then
-            Logger:Write("Dispatcher", "Error", "Execution error in handler '" .. payload.command .. "': " .. tostring(err))
-        end
-    else
-        Logger:Write("Dispatcher", "Warn", "Command handler not registered: " .. tostring(payload.command))
-    end
-end
+}
 
-function Dispatcher:ProcessFrame(dataFrame)
-    if type(dataFrame) ~= "table" then return end
+function Dispatcher:Route(payload, ctx)
+    if type(payload) ~= "table" or not payload.id or not payload.command then return end
     
-    -- Penanganan mode ganda (Array Kombinasi / Objek Tunggal)
-    if not dataFrame.id then
-        for _, subset in pairs(dataFrame) do
-            if type(subset) == "table" and subset.id then
-                self:Route(subset)
+    local commandTime = tonumber(payload.timestamp) or 0
+    if commandTime > 9999999999 then 
+        commandTime = commandTime / 1000 
+    end
+    
+    local timeDiff = os.time() - commandTime
+    if timeDiff > Config.COMMAND_TIMEOUT then 
+        return Logger:Write("Dispatcher", "Warn", string.format("Command '%s' dropped: Stale by %ds", payload.command, timeDiff)) 
+    end
+    
+    if CacheManager:IsDuplicate(payload.id) then return end
+    CacheManager:Mark(payload.id)
+    
+    local cmdDef = Registry:Get(payload.command)
+    if not cmdDef then 
+        return Logger:Write("Dispatcher", "Warn", "No registered handler for: " .. tostring(payload.command)) 
+    end
+    
+    local liveState = ctx:GetLiveState()
+    for reqName, isRequired in pairs(cmdDef.Requirements) do
+        if isRequired then
+            local passed, err = RequirementValidators[reqName](liveState)
+            if not passed then 
+                return Logger:Write("Executor", "Failed", string.format("[%s] Requirement failed: %s", cmdDef.Name, err)) 
             end
         end
+    end
+    
+    local success, cmdOk, msg = pcall(cmdDef.Handler, ctx, liveState, payload)
+    if success and cmdOk then
+        Logger:Write("Executor", "Success", string.format("[%s] -> %s", cmdDef.Name, msg))
     else
-        self:Route(dataFrame)
+        Logger:Write("Executor", "Error", string.format("[%s] Runtime crash: %s", cmdDef.Name, tostring(msg)))
     end
 end
 
--- ============================================================================
--- [12] MAIN LIFECYCLE LOOP
--- ============================================================================
-local function Main()
-    StateManager:TransitionTo("Connecting")
+function Dispatcher:ProcessFrame(dataFrame, ctx)
+    if type(dataFrame) ~= "table" then return end
+    if dataFrame.id ~= nil then
+        self:Route(dataFrame, ctx)
+    else
+        for _, subPayload in pairs(dataFrame) do
+            if type(subPayload) == "table" and subPayload.id ~= nil then
+                self:Route(subPayload, ctx)
+            end
+        end
+    end
+end
+
+local Network = {}
+
+function Network:FetchPayload(url)
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    if req then
+        local success, res = pcall(req, { Url = url, Method = "GET" })
+        if success and res and res.StatusCode == 200 then
+            return res.Body
+        end
+    end
     
-    -- Setup proteksi jika karakter mati/respawn untuk membersihkan state internal
-    LocalPlayer.CharacterAdded:Connect(function()
-        CacheManager:ClearActiveLoops()
-        Logger:Write("Application", "Info", "Character lifecycle reset detected")
+    local success, body = pcall(function()
+        return game:HttpGet(url)
     end)
+    if success and body then return body end
+    
+    local successAsync, bodyAsync = pcall(function()
+        return HttpService:GetAsync(url)
+    end)
+    if successAsync and bodyAsync then return bodyAsync end
+    
+    return nil
+end
+
+local function Main()
+    Logger:Write("System", "Info", "Boot sequence completed. Engine is active.")
     
     while true do
         local rawJson = Network:FetchPayload(Config.FIREBASE_URL)
         
-        if rawJson then
-            StateManager:TransitionTo("Online")
-            local parsedData = JsonParser:SafeDecode(rawJson)
+        if rawJson and rawJson ~= "null" then
+            local decodeOk, parsedTree = pcall(HttpService.JSONDecode, HttpService, rawJson)
             
-            if parsedData then
-                -- Memilah data publik (.all) dan data privat (.PlayerName) dalam 1 Request Frame
-                if parsedData.all then Dispatcher:ProcessFrame(parsedData.all) end
-                if parsedData[LocalPlayer.Name] then Dispatcher:ProcessFrame(parsedData[LocalPlayer.Name]) end
+            if decodeOk and type(parsedTree) == "table" then
+                local frameContext = Context
+                
+                if parsedTree.all then 
+                    Dispatcher:ProcessFrame(parsedTree.all, frameContext) 
+                end
+                if parsedTree[LocalPlayer.Name] then 
+                    Dispatcher:ProcessFrame(parsedTree[LocalPlayer.Name], frameContext) 
+                end
             end
-        else
-            StateManager:TransitionTo("Offline")
-            Logger:Write("Network", "Error", "Failed to synchronize status node frame from cloud data store")
         end
         
         task.wait(Config.POLL_INTERVAL)
     end
 end
 
--- Eksekusi Utama Thread Asinkron
 task.spawn(Main)
